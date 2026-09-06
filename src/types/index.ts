@@ -1,0 +1,148 @@
+/**
+ * MCP Tool Definition (per MCP Specification 2026-07)
+ */
+export interface ToolDefinition {
+  name: string;
+  description?: string;
+  inputSchema: {
+    type: string;
+    properties?: Record<string, any>;
+    required?: string[];
+    [key: string]: any;
+  };
+}
+
+/**
+ * MCP JSON-RPC Request structure
+ */
+export interface McpRequest {
+  jsonrpc: "2.0";
+  id?: string | number;
+  method: string;
+  params?: {
+    name?: string;
+    arguments?: Record<string, any>;
+    [key: string]: any;
+  };
+}
+
+/**
+ * MCP JSON-RPC Response structure
+ */
+export interface McpResponse {
+  jsonrpc: "2.0";
+  id?: string | number;
+  result?: {
+    tools?: ToolDefinition[];
+    content?: Array<{
+      type: string;
+      text?: string;
+      [key: string]: any;
+    }>;
+    isError?: boolean;
+    [key: string]: any;
+  };
+  error?: {
+    code: number;
+    message: string;
+    data?: any;
+  };
+}
+
+/**
+ * Authenticated Client Context
+ */
+export interface AuthContext {
+  clientId: string;
+  roles: string[];
+  scopes?: string[];
+  issuedAt?: number;
+  expiresAt?: number;
+}
+
+/**
+ * Policy Enforcement Point Decision Result
+ */
+export interface PepDecision {
+  allowed: boolean;
+  reason?: string;
+  ruleViolated?: string;
+  details?: Record<string, any>;
+}
+
+/**
+ * SQL Firewall Configuration per Upstream
+ */
+export interface FirewallConfig {
+  enforce_sql_check?: boolean;
+  restricted_roles?: string[];
+  allowed_statements?: string[];
+  deny_statements?: string[];
+  max_limit?: number;
+}
+
+/**
+ * Role to Tools Policy Mapping
+ */
+export interface RoleMapping {
+  allowed_tools: string[];
+}
+
+/**
+ * Upstream MCP Server Configuration
+ */
+export interface UpstreamConfig {
+  id: string;
+  path: string;
+  target: string;
+  description?: string;
+  policies: {
+    role_mappings: Record<string, RoleMapping>;
+    firewall?: FirewallConfig;
+  };
+}
+
+/**
+ * Secret Management Configuration
+ */
+export interface SecretsConfig {
+  provider: "local" | "gcp" | "aws" | "github" | "vault";
+  local?: {
+    master_key_file?: string;
+  };
+  gcp?: {
+    project_id?: string;
+  };
+  aws?: {
+    region?: string;
+  };
+  vault?: {
+    endpoint?: string;
+    role_id_env?: string;
+    secret_id_env?: string;
+  };
+}
+
+/**
+ * Root Gateway Configuration
+ */
+export interface GatewayConfig {
+  version: string;
+  server: {
+    port: number;
+    host?: string;
+    request_timeout_ms?: number;
+    cors?: {
+      origin: string | string[];
+      credentials?: boolean;
+    };
+  };
+  auth?: {
+    issuer?: string;
+    audience?: string;
+    jwks_uri?: string;
+    local_jwt_secret_env?: string;
+  };
+  secrets: SecretsConfig;
+  upstreams: UpstreamConfig[];
+}

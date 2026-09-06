@@ -8,7 +8,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
-    "test": "vitest",
+    "test": "tsx --test tests/**/*.test.ts",
     "lint": "eslint src --ext .ts"
   },
   "keywords": [
@@ -29,8 +29,7 @@
     "@types/jsonwebtoken": "^9.0.8",
     "@types/node": "^22.0.0",
     "tsx": "^4.19.0",
-    "typescript": "^5.7.0",
-    "vitest": "^2.1.0"
+    "typescript": "^5.7.0"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.6.0",
