@@ -123,6 +123,12 @@ export interface SecretsConfig {
   };
 }
 
+export interface OAuthClient {
+  client_id: string;
+  client_secret: string;
+  roles: string[];
+}
+
 /**
  * Root Gateway Configuration
  */
@@ -142,6 +148,7 @@ export interface GatewayConfig {
     audience?: string;
     jwks_uri?: string;
     local_jwt_secret_env?: string;
+    clients?: OAuthClient[];
   };
   secrets: SecretsConfig;
   upstreams: UpstreamConfig[];

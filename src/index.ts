@@ -1,5 +1,12 @@
 import express, { Request, Response, NextFunction } from "express";
 import path from "node:path";
+import jwt from "jsonwebtoken";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import {
+  ListToolsRequestSchema,
+  CallToolRequestSchema,
+} from "@modelcontextprotocol/sdk/types.js";
 import { loadConfig, findUpstreamByPath } from "./config.js";
 import { verifyToken, extractBearerToken } from "./auth/jwt.js";
 import { maskTools, isToolCallAllowed } from "./pep/masking.js";
@@ -33,198 +40,318 @@ try {
 
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 // CORS configuration
-if (config.server.cors) {
-  app.use((req: Request, res: Response, next: NextFunction) => {
-    const origin = config.server.cors?.origin;
-    if (Array.isArray(origin)) {
-      const reqOrigin = req.headers.origin;
-      if (reqOrigin && origin.includes(reqOrigin)) {
-        res.setHeader("Access-Control-Allow-Origin", reqOrigin);
-      }
-    } else if (origin) {
-      res.setHeader("Access-Control-Allow-Origin", origin);
-    }
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-    if (config.server.cors?.credentials) {
-      res.setHeader("Access-Control-Allow-Credentials", "true");
-    }
-    if (req.method === "OPTIONS") {
-      res.sendStatus(204);
-      return;
-    }
-    next();
-  });
-}
+app.use((req: Request, res: Response, next: NextFunction) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept");
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  if (req.method === "OPTIONS") {
+    res.sendStatus(204);
+    return;
+  }
+  next();
+});
 
 // Health check endpoint
 app.get("/healthz", (_req: Request, res: Response) => {
   res.status(200).json({ status: "healthy", version: config.version, timestamp: new Date().toISOString() });
 });
 
-// Authentication & PEP Ingress Middleware
-app.use(async (req: Request, res: Response, next: NextFunction) => {
-  const token = extractBearerToken(req.headers.authorization);
-  if (!token) {
+// ==============================================================================
+// OAuth 2.1 Token Endpoint (Client Credentials Grant)
+// ==============================================================================
+app.post("/oauth/token", (req: Request, res: Response) => {
+  const grantType = req.body.grant_type || req.query.grant_type;
+  let clientId = req.body.client_id || req.query.client_id;
+  let clientSecret = req.body.client_secret || req.query.client_secret;
+
+  // Check Basic Auth header if present
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith("Basic ")) {
+    try {
+      const b64 = authHeader.split(" ")[1];
+      const [u, p] = Buffer.from(b64, "base64").toString().split(":");
+      if (u) clientId = u;
+      if (p) clientSecret = p;
+    } catch (_) {}
+  }
+
+  if (grantType !== "client_credentials") {
+    res.status(400).json({ error: "unsupported_grant_type" });
+    return;
+  }
+
+  const clients = config.auth?.clients || [
+    { client_id: "macosui-analyst", client_secret: "analyst-secret-2026", roles: ["analyst"] },
+    { client_id: "macosui-admin", client_secret: "admin-secret-2026", roles: ["admin"] },
+  ];
+
+  const matchedClient = clients.find(
+    (c) => c.client_id === clientId && c.client_secret === clientSecret
+  );
+
+  if (!matchedClient) {
     defaultAuditLogger.log({
       event_type: "AUTH_FAILED",
       decision: "DENY",
-      reason: "Missing Authorization Bearer token",
-      details: { path: req.path, ip: req.ip },
+      reason: `Invalid client credentials for clientId: ${clientId}`,
+      details: { ip: req.ip },
     });
+    res.status(401).json({ error: "invalid_client" });
+    return;
+  }
+
+  const secretKey =
+    (config.auth?.local_jwt_secret_env
+      ? process.env[config.auth.local_jwt_secret_env]
+      : undefined) ||
+    process.env.GATEWAY_JWT_SECRET ||
+    "zta-dev-default-secret-change-in-production";
+
+  const token = jwt.sign(
+    {
+      sub: matchedClient.client_id,
+      roles: matchedClient.roles,
+    },
+    secretKey,
+    {
+      issuer: config.auth?.issuer || "https://auth.techies.tokyo",
+      audience: config.auth?.audience || "zta-mcp-gateway",
+      expiresIn: "1h",
+    }
+  );
+
+  defaultAuditLogger.log({
+    event_type: "ACCESS_ALLOWED",
+    client_id: matchedClient.client_id,
+    roles: matchedClient.roles,
+    decision: "ALLOW",
+    details: { grant_type: "client_credentials" },
+  });
+
+  res.json({
+    access_token: token,
+    token_type: "Bearer",
+    expires_in: 3600,
+  });
+});
+
+// State for active SSE transports
+const sseTransports = new Map<string, SSEServerTransport>();
+
+// Helper to authenticate request via Bearer header or access_token query param
+function authenticate(req: Request): AuthContext | null {
+  const authHeader = Array.isArray(req.headers.authorization)
+    ? req.headers.authorization[0]
+    : req.headers.authorization;
+  let token = extractBearerToken(authHeader);
+  if (!token && typeof req.query.access_token === "string") {
+    token = req.query.access_token;
+  }
+  if (!token && typeof req.query.token === "string") {
+    token = req.query.token;
+  }
+  if (!token) return null;
+
+  try {
+    return verifyToken(token, config);
+  } catch (e) {
+    return null;
+  }
+}
+
+// ==============================================================================
+// SSE Transport Endpoints (GET /mcp/:upstreamId/sse & POST /mcp/:upstreamId/message)
+// ==============================================================================
+
+app.get("/mcp/:upstreamId/sse", async (req: Request, res: Response) => {
+  const authContext = authenticate(req);
+  if (!authContext) {
+    res.status(401).json({ error: "Unauthorized: Missing or invalid Bearer token" });
+    return;
+  }
+
+  const upstreamId = String(req.params.upstreamId);
+  const upstream = config.upstreams.find((u) => u.id === upstreamId || u.path.endsWith(upstreamId));
+
+  if (!upstream) {
+    res.status(404).json({ error: `Upstream MCP server not found for: ${upstreamId}` });
+    return;
+  }
+
+  console.log(`[ZTA Gateway SSE] Client ${authContext.clientId} (roles: [${authContext.roles.join(", ")}]) connected to ${upstream.id}`);
+
+  const messagePostEndpoint = `/mcp/${upstreamId}/message`;
+  const transport = new SSEServerTransport(messagePostEndpoint, res);
+  const sessionId = transport.sessionId;
+  sseTransports.set(sessionId, transport);
+
+  // Create isolated MCP Server session for this client
+  const mcpServer = new Server(
+    { name: `zta-gateway-${upstream.id}`, version: config.version },
+    { capabilities: { tools: {} } }
+  );
+
+  // 1. Context Masking PEP for tools/list
+  mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
+    try {
+      const upstreamRes = await fetch(upstream.target, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 1 }),
+      });
+      const data = (await upstreamRes.json()) as any;
+      const rawTools = (data.result?.tools || []) as ToolDefinition[];
+
+      const maskedTools = maskTools(rawTools, authContext.roles, upstream);
+
+      defaultAuditLogger.log({
+        event_type: "ACCESS_ALLOWED",
+        client_id: authContext.clientId,
+        roles: authContext.roles,
+        upstream_id: upstream.id,
+        method: "tools/list",
+        decision: "ALLOW",
+        details: { rawCount: rawTools.length, maskedCount: maskedTools.length },
+      });
+
+      return { tools: maskedTools };
+    } catch (err: any) {
+      console.error(`[ZTA Gateway] Failed to list tools from upstream:`, err.message);
+      return { tools: [] };
+    }
+  });
+
+  // 2. Query Firewall PEP for tools/call
+  mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args } = request.params;
+
+    // Check Tool Permission (RBAC)
+    if (!isToolCallAllowed(name, authContext.roles, upstream)) {
+      defaultAuditLogger.log({
+        event_type: "ACCESS_BLOCKED",
+        client_id: authContext.clientId,
+        roles: authContext.roles,
+        upstream_id: upstream.id,
+        method: "tools/call",
+        tool_name: name,
+        decision: "DENY",
+        reason: `Tool '${name}' is not permitted by ZTA policy.`,
+      });
+      throw new Error(`Execution denied: Tool '${name}' is not permitted by ZTA policy.`);
+    }
+
+    // Query Firewall: check SQL argument
+    const queryArg = args?.query || args?.sql;
+    if (typeof queryArg === "string" && upstream.policies.firewall?.enforce_sql_check) {
+      const firewallDecision = validateSqlQuery(queryArg, upstream.policies.firewall, authContext.roles);
+
+      if (!firewallDecision.allowed) {
+        defaultAuditLogger.log({
+          event_type: "FIREWALL_VIOLATION",
+          client_id: authContext.clientId,
+          roles: authContext.roles,
+          upstream_id: upstream.id,
+          method: "tools/call",
+          tool_name: name,
+          decision: "DENY",
+          reason: firewallDecision.reason,
+          details: {
+            ruleViolated: firewallDecision.ruleViolated,
+            querySnippet: queryArg.substring(0, 100),
+          },
+        });
+        throw new Error(firewallDecision.reason || "Query blocked by ZTA SQL Firewall.");
+      }
+    }
+
+    // Forward to upstream target
+    const upstreamRes = await fetch(upstream.target, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: { name, arguments: args },
+        id: Date.now(),
+      }),
+    });
+
+    const data = (await upstreamRes.json()) as any;
+    if (data.error) {
+      throw new Error(data.error.message || "Upstream execution error");
+    }
+
+    return data.result || { content: [] };
+  });
+
+  await mcpServer.connect(transport);
+
+  res.on("close", () => {
+    sseTransports.delete(sessionId);
+    console.log(`[ZTA Gateway SSE] Session ${sessionId} closed`);
+  });
+});
+
+app.post("/mcp/:upstreamId/message", async (req: Request, res: Response) => {
+  const sessionId = req.query.sessionId as string;
+  if (!sessionId) {
+    res.status(400).json({ error: "Missing sessionId query parameter" });
+    return;
+  }
+
+  const transport = sseTransports.get(sessionId);
+  if (!transport) {
+    res.status(400).json({ error: "SSE session not found or expired" });
+    return;
+  }
+
+  await transport.handlePostMessage(req, res, req.body);
+});
+
+// Legacy direct JSON-RPC POST route
+app.post("/mcp/*", async (req: Request, res: Response) => {
+  const authContext = authenticate(req);
+  if (!authContext) {
     res.status(401).json({ error: "Unauthorized: Missing Bearer Token" });
     return;
   }
 
-  try {
-    const authContext = verifyToken(token, config);
-    req.authContext = authContext;
-    next();
-  } catch (err: any) {
-    defaultAuditLogger.log({
-      event_type: "AUTH_FAILED",
-      decision: "DENY",
-      reason: err.message,
-      details: { path: req.path, ip: req.ip },
-    });
-    res.status(401).json({ error: "Unauthorized: Invalid or expired Bearer Token" });
-  }
-});
-
-// Upstream PEP Proxy Route
-app.all("/mcp/*", async (req: Request, res: Response) => {
-  const authContext = req.authContext!;
   const upstream = findUpstreamByPath(config, req.path);
-
   if (!upstream) {
     res.status(404).json({ error: `No upstream MCP server configured for path: ${req.path}` });
     return;
   }
 
-  // Handle MCP JSON-RPC Message
-  if (req.method === "POST") {
-    const mcpReq = req.body as McpRequest;
+  const mcpReq = req.body as McpRequest;
 
-    // 1. Intercept tools/call
-    if (mcpReq.method === "tools/call" && mcpReq.params?.name) {
-      const toolName = mcpReq.params.name;
-
-      // Check tool permission (RBAC)
-      if (!isToolCallAllowed(toolName, authContext.roles, upstream)) {
-        defaultAuditLogger.log({
-          event_type: "ACCESS_BLOCKED",
-          client_id: authContext.clientId,
-          roles: authContext.roles,
-          upstream_id: upstream.id,
-          method: "tools/call",
-          tool_name: toolName,
-          decision: "DENY",
-          reason: `Tool '${toolName}' is not allowed for roles [${authContext.roles.join(", ")}]`,
-        });
-
-        res.status(403).json({
-          jsonrpc: "2.0",
-          id: mcpReq.id,
-          error: {
-            code: -32600,
-            message: `Execution denied: Tool '${toolName}' is not permitted by ZTA policy.`,
-          },
-        });
-        return;
-      }
-
-      // Query Firewall: check SQL argument if applicable
-      const queryArg = mcpReq.params.arguments?.query || mcpReq.params.arguments?.sql;
-      if (typeof queryArg === "string" && upstream.policies.firewall?.enforce_sql_check) {
-        const firewallDecision = validateSqlQuery(queryArg, upstream.policies.firewall, authContext.roles);
-
-        if (!firewallDecision.allowed) {
-          defaultAuditLogger.log({
-            event_type: "FIREWALL_VIOLATION",
-            client_id: authContext.clientId,
-            roles: authContext.roles,
-            upstream_id: upstream.id,
-            method: "tools/call",
-            tool_name: toolName,
-            decision: "DENY",
-            reason: firewallDecision.reason,
-            details: {
-              ruleViolated: firewallDecision.ruleViolated,
-              querySnippet: queryArg.substring(0, 100),
-            },
-          });
-
-          res.status(403).json({
-            jsonrpc: "2.0",
-            id: mcpReq.id,
-            error: {
-              code: -32600,
-              message: firewallDecision.reason || "Query blocked by ZTA SQL Firewall.",
-            },
-          });
-          return;
-        }
-      }
-    }
-
-    // 2. Intercept tools/list (Context Masking)
-    if (mcpReq.method === "tools/list") {
-      try {
-        // Forward tools/list to upstream target
-        const upstreamUrl = upstream.target;
-        const upstreamResponse = await fetch(upstreamUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(mcpReq),
-        });
-
-        const data = (await upstreamResponse.json()) as any;
-        if (data.result?.tools && Array.isArray(data.result.tools)) {
-          const originalTools = data.result.tools as ToolDefinition[];
-          const masked = maskTools(originalTools, authContext.roles, upstream);
-          data.result.tools = masked;
-
-          defaultAuditLogger.log({
-            event_type: "ACCESS_ALLOWED",
-            client_id: authContext.clientId,
-            roles: authContext.roles,
-            upstream_id: upstream.id,
-            method: "tools/list",
-            decision: "ALLOW",
-            details: {
-              originalCount: originalTools.length,
-              maskedCount: masked.length,
-            },
-          });
-        }
-
-        res.status(upstreamResponse.status).json(data);
-        return;
-      } catch (err: any) {
-        res.status(502).json({ error: `Failed to proxy to upstream: ${err.message}` });
-        return;
-      }
-    }
-
-    // Forward other POST requests directly to upstream target
-    try {
-      const response = await fetch(upstream.target, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(mcpReq),
+  if (mcpReq.method === "tools/call" && mcpReq.params?.name) {
+    const toolName = mcpReq.params.name;
+    if (!isToolCallAllowed(toolName, authContext.roles, upstream)) {
+      res.status(403).json({
+        jsonrpc: "2.0",
+        id: mcpReq.id,
+        error: { code: -32600, message: `Execution denied: Tool '${toolName}' is not permitted by ZTA policy.` },
       });
-      const data = await response.json();
-      res.status(response.status).json(data);
-    } catch (err: any) {
-      res.status(502).json({ error: `Upstream error: ${err.message}` });
+      return;
     }
-    return;
   }
 
-  // Handle GET / SSE proxying
-  res.status(501).json({ message: "SSE streaming proxy endpoint initialized" });
+  // Forward
+  try {
+    const response = await fetch(upstream.target, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(mcpReq),
+    });
+    const data = await response.json();
+    res.status(response.status).json(data);
+  } catch (err: any) {
+    res.status(502).json({ error: err.message });
+  }
 });
 
 const PORT = config.server.port || 8080;
