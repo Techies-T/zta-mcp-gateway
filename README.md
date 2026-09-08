@@ -108,52 +108,211 @@ zta-mcp-gateway/
 
 ---
 
-## 🚀 設定例 (`config/gateway-config.yaml`)
+## 🚀 設定ファイル仕様と運用ガイド (`gateway-config.yaml`)
+
+本ゲートウェイは、**「上流のMCPサーバー（MariaDB等）のソースコードを一切改修することなく、設定ファイル（YAML）の定義のみで単一のMCPサーバーを『参照専用』と『管理者用（更新可能）』の2つの独立したツールセットへ動的に分離」** します。
+
+---
+
+### 1. ツール分離（Context Masking）の動作原理
+
+上流の MariaDB MCP サーバーが提供する 5 つのツール（`read_query`, `write_query`, `drop_table`, `list_tables`, `describe_table`）に対し、接続元クライアントの JWT ロールに応じてゲートウェイが動的に視界をフィルタリングします。
+
+```text
+┌──────────────────────────────────────────────────────────┐
+│  上流 MCP サーバー (mariadb-mcp-server: 1プロセスのみ稼働)│
+│  提供ツール: list_tables, describe_table,               │
+│             read_query, write_query, drop_table          │
+└────────────────────────────┬─────────────────────────────┘
+                             │ (リバースプロキシ中継)
+┌────────────────────────────▼─────────────────────────────┐
+│  ZTA MCP Gateway (PEP: Policy Enforcement Point)         │
+│  ※ クライアントの OAuth JWT トークン (roles) を動的評価 │
+└──────────────┬────────────────────────────┬──────────────┘
+               │                            │
+  (roles: ["analyst"])             (roles: ["admin"])
+               ▼                            ▼
+┌─────────────────────────────┐ ┌─────────────────────────────┐
+│ ① 参照専用ツールセット (3個) │ │ ② 管理者用ツールセット (5個)│
+│ ・read_query                │ │ ・read_query                │
+│ ・list_tables               │ │ ・write_query               │
+│ ・describe_table            │ │ ・drop_table                │
+│ ※ 更新ツールは完全隠蔽      │ │ ・list_tables               │
+│ ※ SQL FirewallでSELECT限定  │ │ ・describe_table            │
+└─────────────────────────────┘ └─────────────────────────────┘
+```
+
+---
+
+### 2. 完全な設定サンプル (`config/gateway-config.container.yaml`)
 
 ```yaml
 version: "1.0"
+
 server:
   port: 8080
+  host: "0.0.0.0"
   cors:
     origin: "*"
 
-# プラガブル鍵管理の指定
-secrets:
-  provider: "local" # local | gcp | aws | github | vault
-  local:
-    key_file: "./keys/master.key"
+# -------------------------------------------------------------
+# ① OAuth 2.1 M2M 認証設定 (Client ID & Client Secret)
+# -------------------------------------------------------------
+auth:
+  issuer: "https://auth.techies.tokyo"
+  audience: "zta-mcp-gateway"
+  local_jwt_secret_env: "GATEWAY_JWT_SECRET"
+  clients:
+    # 参照専用クライアント (一般ユーザー・アナリスト用)
+    - client_id: "macosui-analyst"
+      client_secret: "analyst-secret-2026"
+      roles: ["analyst"]
 
-# 上流MCPサーバーのルーティングとZTAポリシー定義
+    # 管理者用クライアント (システム管理者用)
+    - client_id: "macosui-admin"
+      client_secret: "admin-secret-2026"
+      roles: ["admin"]
+
+# -------------------------------------------------------------
+# ② プラガブル暗号鍵プロバイダ
+# -------------------------------------------------------------
+secrets:
+  provider: "local"  # local | gcp | aws | github | vault
+
+# -------------------------------------------------------------
+# ③ 上流MCPサーバーとツール分離ポリシー (Context Masking & Firewall)
+# -------------------------------------------------------------
 upstreams:
-  # 1. MariaDB 公式 MCP サーバーの保護設定
-  - id: "mariadb-upstream"
+  - id: "mariadb"
     path: "/mcp/mariadb"
-    target: "http://localhost:33060/sse"
+    target: "http://host.docker.internal:33060/mcp"   # 単一のMariaDB MCPサーバー
+    description: "MariaDB MCP Server with ZTA Protection"
     policies:
-      # ロールごとのツール認可 (Context Masking)
+      # ロールごとの利用可能ツール定義 (Context Masking)
       role_mappings:
+        guest:
+          allowed_tools: []
+        # analystロール：参照系3ツールのみを公開 (write_query, drop_tableは不可視化)
         analyst:
           allowed_tools:
             - "read_query"
             - "list_tables"
             - "describe_table"
-        dba_admin:
+        # adminロール：全ツール利用可能
+        admin:
           allowed_tools:
             - "*"
-      # 実行時クエリファイアウォール (Query Firewall)
+
+      # 実行時クエリ構文解析ファイアウォール (Query Firewall)
       firewall:
         enforce_sql_check: true
         restricted_roles:
           - "analyst"
         allowed_statements:
-          - "SELECT"
-        deny_statements:
+          - "SELECT"                                   # analystはSELECT文のみ許可
+        deny_statements:                               # 破壊的・更新系SQLは構文解析木(AST)で即時遮断
           - "INSERT"
           - "UPDATE"
           - "DELETE"
           - "DROP"
           - "ALTER"
           - "TRUNCATE"
+          - "GRANT"
+          - "REVOKE"
+```
+
+---
+
+### 3. クライアント側（MacOSUI）での登録手順
+
+MacOSUIの管理画面（`System Settings > MCP Connections`）では、同一エンドポイントに対して2種類のクレデンシャルを登録します。
+
+1. **参照専用の登録**:
+   - **名称**: `NPB Baseball (参照専用)`
+   - **Endpoint URL**: `http://host.docker.internal:8085/mcp/mariadb/sse`
+   - **Token URL**: `http://host.docker.internal:8085/oauth/token`
+   - **Client ID**: `macosui-analyst`
+   - **Client Secret**: `analyst-secret-2026`
+   - **認識ツール数**: **3個** (`read_query`, `list_tables`, `describe_table`)
+
+2. **管理者用（参照・更新）の登録**:
+   - **名称**: `NPB Baseball (管理者用 / 参照・更新)`
+   - **Endpoint URL**: `http://host.docker.internal:8085/mcp/mariadb/sse`
+   - **Token URL**: `http://host.docker.internal:8085/oauth/token`
+   - **Client ID**: `macosui-admin`
+   - **Client Secret**: `admin-secret-2026`
+   - **認識ツール数**: **5個** (`read_query`, `write_query`, `drop_table`, `list_tables`, `describe_table`)
+
+3. **ロールへの適用 (`System Settings > Roles & Permissions`)**:
+   - 一般ユーザー（`user` ロール）には `参照専用` のみチェックをONにし、`管理者用` をOFFにします。
+   - 管理者（`admin` ロール）には全権限（Full Access）を付与します。
+
+---
+
+### 4. curl による動作検証・疎通コマンド
+
+運用管理者がコマンドラインから直接ゲートウェイの分離・遮断動作を検証するための手順です。
+
+#### (1) OAuth トークン（JWT）の発行
+```bash
+# 参照専用 (analyst) のトークン取得
+ANALYST_TOKEN=$(curl -s -X POST http://localhost:8085/oauth/token \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=client_credentials&client_id=macosui-analyst&client_secret=analyst-secret-2026&audience=http://localhost:8085/mcp/mariadb/sse" \
+  | jq -r .access_token)
+
+# 管理者 (admin) のトークン取得
+ADMIN_TOKEN=$(curl -s -X POST http://localhost:8085/oauth/token \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=client_credentials&client_id=macosui-admin&client_secret=admin-secret-2026&audience=http://localhost:8085/mcp/mariadb/sse" \
+  | jq -r .access_token)
+```
+
+#### (2) ツール一覧（Context Masking）の確認
+```bash
+# analyst でのリクエスト（3個のみ返却されることを確認）
+curl -s -X POST http://localhost:8085/mcp/mariadb \
+  -H "Authorization: Bearer $ANALYST_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc": "2.0", "method": "tools/list", "id": 1}' \
+  | jq '.result.tools[].name'
+# 出力: "read_query", "list_tables", "describe_table"
+
+# admin でのリクエスト（全5個が返却されることを確認）
+curl -s -X POST http://localhost:8085/mcp/mariadb \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc": "2.0", "method": "tools/list", "id": 1}' \
+  | jq '.result.tools[].name'
+# 出力: "read_query", "write_query", "drop_table", "list_tables", "describe_table"
+```
+
+#### (3) SQL Firewall による不正クエリ遮断の確認
+```bash
+# analyst トークンで UPDATE 文を含む read_query を強行呼び出し
+curl -s -X POST http://localhost:8085/mcp/mariadb \
+  -H "Authorization: Bearer $ANALYST_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "tools/call",
+    "params": {
+      "name": "read_query",
+      "arguments": { "query": "UPDATE batting_stats SET home_runs = 50 WHERE player_id = 1;" }
+    },
+    "id": 2
+  }' | jq .
+```
+**期待されるレスポンス (403 Forbidden)**:
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "error": {
+    "code": -32600,
+    "message": "Execution denied: Execution denied: Statement type 'UPDATE' is forbidden by ZTA policy."
+  }
+}
 ```
 
 ---

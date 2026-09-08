@@ -246,10 +246,17 @@ app.get("/mcp/:upstreamId/sse", async (req: Request, res: Response) => {
 
     // Query Firewall: check SQL argument
     const queryArg = args?.query || args?.sql;
+    if (typeof queryArg === "string") {
+      console.log(`[ZTA PEP Query] 🔍 Executing Tool '${name}' | Client: ${authContext.clientId} | SQL:\n${queryArg}`);
+    } else {
+      console.log(`[ZTA PEP Tool] ⚙️ Executing Tool '${name}' | Client: ${authContext.clientId}`);
+    }
+
     if (typeof queryArg === "string" && upstream.policies.firewall?.enforce_sql_check) {
       const firewallDecision = validateSqlQuery(queryArg, upstream.policies.firewall, authContext.roles);
 
       if (!firewallDecision.allowed) {
+        console.warn(`[ZTA PEP Firewall] 🚨 Blocked query: ${firewallDecision.reason}`);
         defaultAuditLogger.log({
           event_type: "FIREWALL_VIOLATION",
           client_id: authContext.clientId,
@@ -284,6 +291,21 @@ app.get("/mcp/:upstreamId/sse", async (req: Request, res: Response) => {
     if (data.error) {
       throw new Error(data.error.message || "Upstream execution error");
     }
+
+    // Log successful tool execution in ZTA audit logger
+    defaultAuditLogger.log({
+      event_type: "TOOL_EXECUTION",
+      client_id: authContext.clientId,
+      roles: authContext.roles,
+      upstream_id: upstream.id,
+      method: "tools/call",
+      tool_name: name,
+      decision: "ALLOW",
+      details: {
+        sqlQuery: typeof queryArg === "string" ? queryArg : undefined,
+        args: typeof queryArg === "string" ? undefined : args,
+      },
+    });
 
     return data.result || { content: [] };
   });
@@ -328,6 +350,28 @@ app.post("/mcp/*", async (req: Request, res: Response) => {
 
   const mcpReq = req.body as McpRequest;
 
+  if (mcpReq.method === "tools/list") {
+    try {
+      const response = await fetch(upstream.target, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(mcpReq),
+      });
+      const data = (await response.json()) as any;
+      const rawTools = (data.result?.tools || []) as ToolDefinition[];
+      const maskedTools = maskTools(rawTools, authContext.roles, upstream);
+      res.status(response.status).json({
+        jsonrpc: "2.0",
+        id: mcpReq.id,
+        result: { tools: maskedTools },
+      });
+      return;
+    } catch (err: any) {
+      res.status(502).json({ error: err.message });
+      return;
+    }
+  }
+
   if (mcpReq.method === "tools/call" && mcpReq.params?.name) {
     const toolName = mcpReq.params.name;
     if (!isToolCallAllowed(toolName, authContext.roles, upstream)) {
@@ -337,6 +381,20 @@ app.post("/mcp/*", async (req: Request, res: Response) => {
         error: { code: -32600, message: `Execution denied: Tool '${toolName}' is not permitted by ZTA policy.` },
       });
       return;
+    }
+
+    const args = mcpReq.params.arguments;
+    const queryArg = args?.query || args?.sql;
+    if (typeof queryArg === "string" && upstream.policies.firewall?.enforce_sql_check) {
+      const firewallDecision = validateSqlQuery(queryArg, upstream.policies.firewall, authContext.roles);
+      if (!firewallDecision.allowed) {
+        res.status(403).json({
+          jsonrpc: "2.0",
+          id: mcpReq.id,
+          error: { code: -32600, message: `Execution denied: ${firewallDecision.reason}` },
+        });
+        return;
+      }
     }
   }
 

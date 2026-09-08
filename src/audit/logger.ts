@@ -4,6 +4,7 @@ export type AuditEventType =
   | "ACCESS_ALLOWED"
   | "ACCESS_BLOCKED"
   | "FIREWALL_VIOLATION"
+  | "TOOL_EXECUTION"
   | "AUTH_FAILED"
   | "CONFIG_LOADED";
 
