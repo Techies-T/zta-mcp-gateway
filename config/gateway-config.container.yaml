@@ -18,10 +18,29 @@ auth:
       client_secret: "admin-secret-2026"
       roles: ["admin"]
 
+catalog:
+  definitions_file: "./catalog-definitions.yaml"
+
 secrets:
   provider: "local"
 
 upstreams:
+  - id: "catalog"
+    path: "/mcp/catalog"
+    target: "internal://catalog"
+    description: "Meta-Catalog MCP for Database Schemas and GenUI Specifications"
+    policies:
+      role_mappings:
+        guest:
+          allowed_tools: []
+        analyst:
+          allowed_tools:
+            - "list_catalog"
+            - "get_catalog_detail"
+        admin:
+          allowed_tools:
+            - "*"
+
   - id: "mariadb"
     path: "/mcp/mariadb"
     target: "http://host.docker.internal:33060/mcp"
@@ -44,6 +63,8 @@ upstreams:
           - "analyst"
         allowed_statements:
           - "SELECT"
+          - "SHOW"
+          - "DESC"
         deny_statements:
           - "INSERT"
           - "UPDATE"

@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import path from "node:path";
 import yaml from "yaml";
 import { GatewayConfig, UpstreamConfig } from "./types/index.js";
 
@@ -33,6 +34,13 @@ export function loadConfig(configPath: string): GatewayConfig {
     }
     if (!upstream.policies || !upstream.policies.role_mappings) {
       throw new Error(`Upstream '${upstream.id}' is missing role_mappings policy`);
+    }
+  }
+
+  if (parsed.catalog && parsed.catalog.definitions_file) {
+    const configDir = path.dirname(configPath);
+    if (!path.isAbsolute(parsed.catalog.definitions_file)) {
+      parsed.catalog.definitions_file = path.resolve(configDir, parsed.catalog.definitions_file);
     }
   }
 

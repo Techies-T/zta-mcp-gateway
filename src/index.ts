@@ -12,6 +12,7 @@ import { verifyToken, extractBearerToken } from "./auth/jwt.js";
 import { maskTools, isToolCallAllowed } from "./pep/masking.js";
 import { validateSqlQuery } from "./pep/firewall.js";
 import { defaultAuditLogger } from "./audit/logger.js";
+import { CatalogProvider } from "./catalog/index.js";
 import { AuthContext, GatewayConfig, McpRequest, ToolDefinition } from "./types/index.js";
 
 // Extend Express Request with authenticated AuthContext
@@ -25,9 +26,11 @@ declare global {
 
 const CONFIG_PATH = process.env.GATEWAY_CONFIG_PATH || path.resolve("config/gateway-config.example.yaml");
 let config: GatewayConfig;
+let catalogProvider: CatalogProvider;
 
 try {
   config = loadConfig(CONFIG_PATH);
+  catalogProvider = new CatalogProvider(config.catalog?.definitions_file);
   defaultAuditLogger.log({
     event_type: "CONFIG_LOADED",
     decision: "INFO",
@@ -189,6 +192,15 @@ app.get("/mcp/:upstreamId/sse", async (req: Request, res: Response) => {
   const sessionId = transport.sessionId;
   sseTransports.set(sessionId, transport);
 
+  // Send SSE keepalive comments every 15s to prevent idle timeout
+  const keepAliveTimer = setInterval(() => {
+    try {
+      res.write(": keepalive\n\n");
+    } catch {
+      clearInterval(keepAliveTimer);
+    }
+  }, 15000);
+
   // Create isolated MCP Server session for this client
   const mcpServer = new Server(
     { name: `zta-gateway-${upstream.id}`, version: config.version },
@@ -198,13 +210,19 @@ app.get("/mcp/:upstreamId/sse", async (req: Request, res: Response) => {
   // 1. Context Masking PEP for tools/list
   mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
     try {
-      const upstreamRes = await fetch(upstream.target, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 1 }),
-      });
-      const data = (await upstreamRes.json()) as any;
-      const rawTools = (data.result?.tools || []) as ToolDefinition[];
+      let rawTools: ToolDefinition[] = [];
+
+      if (upstream.id === "catalog" || upstream.target.startsWith("internal://catalog")) {
+        rawTools = catalogProvider.getToolDefinitions();
+      } else {
+        const upstreamRes = await fetch(upstream.target, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jsonrpc: "2.0", method: "tools/list", id: 1 }),
+        });
+        const data = (await upstreamRes.json()) as any;
+        rawTools = (data.result?.tools || []) as ToolDefinition[];
+      }
 
       const maskedTools = maskTools(rawTools, authContext.roles, upstream);
 
@@ -242,6 +260,39 @@ app.get("/mcp/:upstreamId/sse", async (req: Request, res: Response) => {
         reason: `Tool '${name}' is not permitted by ZTA policy.`,
       });
       throw new Error(`Execution denied: Tool '${name}' is not permitted by ZTA policy.`);
+    }
+
+    // Handle Built-in Meta-Catalog Tools
+    if (upstream.id === "catalog" || upstream.target.startsWith("internal://catalog")) {
+      console.log(`[ZTA Catalog Tool] 📚 Executing Catalog Tool '${name}' | Client: ${authContext.clientId}`);
+      let contentResult: any;
+
+      if (name === "list_catalog") {
+        const catalogList = catalogProvider.listCatalog(authContext.roles);
+        contentResult = { content: [{ type: "text", text: JSON.stringify(catalogList, null, 2) }] };
+      } else if (name === "get_catalog_detail") {
+        const serviceId = String(args?.service_id || "");
+        if (!serviceId) {
+          throw new Error("Missing required argument: 'service_id'");
+        }
+        const detail = catalogProvider.getCatalogDetail(serviceId, authContext.roles);
+        contentResult = { content: [{ type: "text", text: JSON.stringify(detail, null, 2) }] };
+      } else {
+        throw new Error(`Unknown catalog tool '${name}'`);
+      }
+
+      defaultAuditLogger.log({
+        event_type: "TOOL_EXECUTION",
+        client_id: authContext.clientId,
+        roles: authContext.roles,
+        upstream_id: upstream.id,
+        method: "tools/call",
+        tool_name: name,
+        decision: "ALLOW",
+        details: { args },
+      });
+
+      return contentResult;
     }
 
     // Query Firewall: check SQL argument
@@ -313,6 +364,7 @@ app.get("/mcp/:upstreamId/sse", async (req: Request, res: Response) => {
   await mcpServer.connect(transport);
 
   res.on("close", () => {
+    clearInterval(keepAliveTimer);
     sseTransports.delete(sessionId);
     console.log(`[ZTA Gateway SSE] Session ${sessionId} closed`);
   });
@@ -352,15 +404,20 @@ app.post("/mcp/*", async (req: Request, res: Response) => {
 
   if (mcpReq.method === "tools/list") {
     try {
-      const response = await fetch(upstream.target, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(mcpReq),
-      });
-      const data = (await response.json()) as any;
-      const rawTools = (data.result?.tools || []) as ToolDefinition[];
+      let rawTools: ToolDefinition[] = [];
+      if (upstream.id === "catalog" || upstream.target.startsWith("internal://catalog")) {
+        rawTools = catalogProvider.getToolDefinitions();
+      } else {
+        const response = await fetch(upstream.target, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(mcpReq),
+        });
+        const data = (await response.json()) as any;
+        rawTools = (data.result?.tools || []) as ToolDefinition[];
+      }
       const maskedTools = maskTools(rawTools, authContext.roles, upstream);
-      res.status(response.status).json({
+      res.status(200).json({
         jsonrpc: "2.0",
         id: mcpReq.id,
         result: { tools: maskedTools },
@@ -384,6 +441,37 @@ app.post("/mcp/*", async (req: Request, res: Response) => {
     }
 
     const args = mcpReq.params.arguments;
+
+    if (upstream.id === "catalog" || upstream.target.startsWith("internal://catalog")) {
+      try {
+        if (toolName === "list_catalog") {
+          const catalogList = catalogProvider.listCatalog(authContext.roles);
+          res.status(200).json({
+            jsonrpc: "2.0",
+            id: mcpReq.id,
+            result: { content: [{ type: "text", text: JSON.stringify(catalogList, null, 2) }] },
+          });
+          return;
+        } else if (toolName === "get_catalog_detail") {
+          const serviceId = String(args?.service_id || "");
+          const detail = catalogProvider.getCatalogDetail(serviceId, authContext.roles);
+          res.status(200).json({
+            jsonrpc: "2.0",
+            id: mcpReq.id,
+            result: { content: [{ type: "text", text: JSON.stringify(detail, null, 2) }] },
+          });
+          return;
+        }
+      } catch (err: any) {
+        res.status(400).json({
+          jsonrpc: "2.0",
+          id: mcpReq.id,
+          error: { code: -32603, message: err.message },
+        });
+        return;
+      }
+    }
+
     const queryArg = args?.query || args?.sql;
     if (typeof queryArg === "string" && upstream.policies.firewall?.enforce_sql_check) {
       const firewallDecision = validateSqlQuery(queryArg, upstream.policies.firewall, authContext.roles);

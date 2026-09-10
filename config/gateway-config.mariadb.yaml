@@ -11,11 +11,30 @@ auth:
   audience: "zta-mcp-gateway"
   local_jwt_secret_env: "GATEWAY_JWT_SECRET"
 
+catalog:
+  definitions_file: "./catalog-definitions.yaml"
+
 secrets:
   provider: "local"
 
 upstreams:
-  - id: "mariadb-upstream"
+  - id: "catalog"
+    path: "/mcp/catalog"
+    target: "internal://catalog"
+    description: "Meta-Catalog MCP for Database Schemas and GenUI Specifications"
+    policies:
+      role_mappings:
+        guest:
+          allowed_tools: []
+        analyst:
+          allowed_tools:
+            - "list_catalog"
+            - "get_catalog_detail"
+        admin:
+          allowed_tools:
+            - "*"
+
+  - id: "mariadb"
     path: "/mcp/mariadb"
     target: "http://127.0.0.1:33060/mcp"
     description: "MariaDB MCP Server with ZTA Protection"
@@ -37,6 +56,8 @@ upstreams:
           - "analyst"
         allowed_statements:
           - "SELECT"
+          - "SHOW"
+          - "DESC"
         deny_statements:
           - "INSERT"
           - "UPDATE"

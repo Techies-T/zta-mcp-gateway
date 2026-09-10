@@ -151,5 +151,58 @@ export interface GatewayConfig {
     clients?: OAuthClient[];
   };
   secrets: SecretsConfig;
+  catalog?: {
+    definitions_file?: string;
+  };
   upstreams: UpstreamConfig[];
 }
+
+/**
+ * Catalog Table Schema definition
+ */
+export interface CatalogTableSchema {
+  name: string;
+  description?: string;
+  primary_key?: string;
+  columns?: string;
+  relationships?: string[];
+}
+
+/**
+ * GenUI Specification definition for AI-Native BI
+ */
+export interface CatalogGenUiConfig {
+  recommended_layout?: string;
+  framework?: string;
+  color_palette?: Record<string, string>;
+  components?: Array<Record<string, any>>;
+  [key: string]: any;
+}
+
+/**
+ * Catalog Item definition for Meta-Catalog MCP
+ */
+export interface CatalogItem {
+  id: string;
+  name: string;
+  description: string;
+  target_mcp?: string;
+  target_tool?: string;
+  required_roles?: string[];
+  schema?: {
+    tables?: CatalogTableSchema[];
+    query_rules?: string[];
+    recommended_queries?: Array<{ title?: string; sql: string }>;
+    [key: string]: any;
+  };
+  gen_ui?: CatalogGenUiConfig;
+}
+
+/**
+ * Catalog Definitions Root
+ */
+export interface CatalogDefinitions {
+  version: string;
+  catalogs: CatalogItem[];
+}
+

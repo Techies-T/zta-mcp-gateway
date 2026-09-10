@@ -1,0 +1,131 @@
+version: "1.0"
+catalogs:
+  # ============================================================================
+  # 1. NPB プロ野球統計データベース (2024-2025 マルチ年度分析)
+  # ============================================================================
+  - id: "npb_baseball_analytics"
+    name: "NPB プロ野球統計データベース (2024-2025)"
+    description: "プロ野球（セ・パ両リーグ）の選手マスタ、2024年および2025年の公式打撃・投平成績、WAR/WAA セイバーメトリクス指標"
+    target_mcp: "mariadb"
+    target_tool: "read_query"
+    required_roles: ["analyst", "admin"]
+
+    # --- 1. データモデル (スキーマ定義) ---
+    schema:
+      tables:
+        - name: "batting_stats"
+          description: "野手のシーズン打撃成績 (2024年・2025年)"
+          primary_key: "id"
+          columns: "id (INT), player_id (INT, FK), year (INT: 2024 or 2025), war (DECIMAL: 総合勝利寄与度), waa (DECIMAL: 平均以上勝利数), batting_avg (DECIMAL: 打率), home_runs (INT: 本塁打), rbi (INT: 打点), ops (DECIMAL: OPS), woba (DECIMAL), title_awards (VARCHAR: タイトル表彰)"
+          relationships:
+            - "JOIN players ON batting_stats.player_id = players.player_id"
+
+        - name: "pitching_stats"
+          description: "投手のシーズン成績 (2024年・2025年)"
+          primary_key: "id"
+          columns: "id (INT), player_id (INT, FK), year (INT: 2024 or 2025), war (DECIMAL), waa (DECIMAL), era (DECIMAL: 防御率), whip (DECIMAL), fip (DECIMAL), wins (INT: 勝利), losses (INT: 敗戦), strikeouts (INT: 奪三振), title_awards (VARCHAR)"
+          relationships:
+            - "JOIN players ON pitching_stats.player_id = players.player_id"
+
+        - name: "players"
+          description: "選手基本情報マスタ"
+          primary_key: "player_id"
+          columns: "player_id (INT), name (VARCHAR: 選手名), team_id (VARCHAR: 球団コード), position (VARCHAR: 守備位置), bats_throws (VARCHAR: 投打)"
+
+        - name: "teams"
+          description: "球団マスタ"
+          primary_key: "team_id"
+          columns: "team_id (VARCHAR: 'T','DB','G','D','C','S','H','F','M','E','B','L'), team_name (VARCHAR: 正式球団名), league (VARCHAR: 'Central' or 'Pacific')"
+
+        - name: "team_standings"
+          description: "球団順位表 (2024年・2025年)"
+          primary_key: "id"
+          columns: "id (INT), team_id (VARCHAR), team_name (VARCHAR), league (VARCHAR), year (INT), wins (INT), losses (INT), draws (INT), win_rate (DECIMAL), games_behind (DECIMAL)"
+
+      query_rules:
+        - "必ず year 条件（2024 または 2025）を指定してください。"
+        - "選手名を表示する際は、必ず players テーブルを player_id で JOIN してください。"
+        - "探索用コマンド (SHOW TABLES, DESCRIBE) は不要です。直接本定義のカラムで SELECT を発行してください。"
+
+      recommended_queries:
+        - title: "2025年 野手 WAR ランキング TOP 10 抽出"
+          sql: |
+            SELECT p.name, t.team_name, b.year, b.war, b.waa, b.home_runs, b.batting_avg, b.ops, b.title_awards
+            FROM batting_stats b
+            JOIN players p ON b.player_id = p.player_id
+            JOIN teams t ON p.team_id = t.team_id
+            WHERE b.year = 2025
+            ORDER BY b.war DESC
+            LIMIT 10;
+        - title: "2024 vs 2025 年 野手比較（同一選手の2カ年推移）"
+          sql: |
+            SELECT p.name, t.team_name,
+                   b25.war AS war_2025, b25.waa AS waa_2025, b25.home_runs AS hr_2025, b25.batting_avg AS avg_2025, b25.ops AS ops_2025, b25.title_awards AS title_2025,
+                   b24.war AS war_2024, b24.waa AS waa_2024, b24.home_runs AS hr_2024, b24.batting_avg AS avg_2024, b24.ops AS ops_2024, b24.title_awards AS title_2024
+            FROM batting_stats b25
+            JOIN players p ON b25.player_id = p.player_id
+            JOIN teams t ON p.team_id = t.team_id
+            LEFT JOIN batting_stats b24 ON b25.player_id = b24.player_id AND b24.year = 2024
+            WHERE b25.year = 2025
+            ORDER BY b25.war DESC
+            LIMIT 10;
+
+    # --- 2. GenUI (推奨画面設計図) ---
+    gen_ui:
+      recommended_layout: "ComparisonDashboard"
+      framework: "TailwindCSS + Chart.js"
+      color_palette:
+        primary: "#3b82f6"         # 2025年アクセントブルー
+        secondary: "#94a3b8"       # 2024年スレートグレー
+        accent_positive: "#10b981"   # 前年比プラス (+緑)
+        accent_negative: "#ef4444"   # 前年比マイナス (-赤)
+        card_bg: "#1e293b"         # ダークカード背景
+      
+      components:
+        - type: "tabs"
+          labels: ["⚾ 野手ランキング (WAR/WAA)", "🎯 投手ランキング (WAR/WAA)"]
+          default_index: 0
+
+        - type: "chart"
+          chart_type: "bar"
+          title: "2024年 vs 2025年 WAR 成長比較 (グループ棒グラフ)"
+          x_axis: "name"
+          y_axis: "war"
+          series:
+            - key: "war_2024"
+              label: "2024年 WAR"
+              color: "#94a3b8"
+            - key: "war_2025"
+              label: "2025年 WAR"
+              color: "#3b82f6"
+          interaction:
+            event: "click_bar"
+            target_component: "player_detail_card"
+            action: "update_card_with_player_stats"
+            instruction: "Chart.js の onClick(evt, activeEls) でクリックされた選手の 2カ年変化・タイトルをグラフ下部の詳細カードに動的表示すること（alert() は使用禁止）。"
+
+        - type: "detail_card"
+          id: "player_detail_card"
+          title: "選手詳細スタッツ (2カ年比較)"
+          fields:
+            - label: "獲得タイトル"
+              key: "title_awards"
+            - label: "本塁打 / 打率 / OPS"
+              format: "{home_runs}本 / 打率.{batting_avg} / OPS {ops}"
+            - label: "前年比成長"
+              format: "WAR {diff_war} ({sign_war})"
+
+        - type: "table"
+          title: "WAR / WAA 詳細比較ランキング"
+          columns:
+            - { label: "2025順位", key: "rank" }
+            - { label: "選手名", key: "name" }
+            - { label: "球団", key: "team_name" }
+            - { label: "2025 WAR (WAA)", key: "stats_2025" }
+            - { label: "2024 WAR (WAA)", key: "stats_2024" }
+            - { label: "前年比", key: "diff", highlight: true }
+            - { label: "獲得タイトル・主要成績", key: "title_awards" }
+
+        - type: "insight_banner"
+          title: "セイバーメトリクス分析サマリー"
+          description: "WARを最も伸ばした選手の成長要因（2冠・打撃進化など）やチーム優勝貢献度（WAA）のAI要因解説ハイライト"
