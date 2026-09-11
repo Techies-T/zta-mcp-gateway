@@ -1,11 +1,11 @@
 version: "1.0"
 catalogs:
   # ============================================================================
-  # 1. NPB プロ野球統計データベース (2024-2025 マルチ年度分析)
+  # 1. NPB プロ野球統計データベース (2024-2026 マルチ年度分析 & 優勝シミュレーション)
   # ============================================================================
   - id: "npb_baseball_analytics"
-    name: "NPB プロ野球統計データベース (2024-2025)"
-    description: "プロ野球（セ・パ両リーグ）の選手マスタ、2024年および2025年の公式打撃・投平成績、WAR/WAA セイバーメトリクス指標"
+    name: "NPB プロ野球統計データベース (2024-2026)"
+    description: "プロ野球（セ・パ両リーグ）の選手マスタ、2024年・2025年の公式成績、および2026年最新（残り20試合・終盤時点）の打撃・投平成績、順位表、WAR/WAA セイバーメトリクス指標"
     target_mcp: "mariadb"
     target_tool: "read_query"
     required_roles: ["analyst", "admin"]
@@ -14,16 +14,16 @@ catalogs:
     schema:
       tables:
         - name: "batting_stats"
-          description: "野手のシーズン打撃成績 (2024年・2025年)"
+          description: "野手のシーズン打撃成績 (2024年・2025年・2026年最新)"
           primary_key: "id"
-          columns: "id (INT), player_id (INT, FK), year (INT: 2024 or 2025), war (DECIMAL: 総合勝利寄与度), waa (DECIMAL: 平均以上勝利数), batting_avg (DECIMAL: 打率), home_runs (INT: 本塁打), rbi (INT: 打点), ops (DECIMAL: OPS), woba (DECIMAL), title_awards (VARCHAR: タイトル表彰)"
+          columns: "id (INT), player_id (INT, FK), year (INT: 2024, 2025, 2026), war (DECIMAL: 総合勝利寄与度), waa (DECIMAL: 平均以上勝利数), batting_avg (DECIMAL: 打率), home_runs (INT: 本塁打), rbi (INT: 打点), ops (DECIMAL: OPS), woba (DECIMAL), title_awards (VARCHAR: タイトル表彰)"
           relationships:
             - "JOIN players ON batting_stats.player_id = players.player_id"
 
         - name: "pitching_stats"
-          description: "投手のシーズン成績 (2024年・2025年)"
+          description: "投手のシーズン成績 (2024年・2025年・2026年最新)"
           primary_key: "id"
-          columns: "id (INT), player_id (INT, FK), year (INT: 2024 or 2025), war (DECIMAL), waa (DECIMAL), era (DECIMAL: 防御率), whip (DECIMAL), fip (DECIMAL), wins (INT: 勝利), losses (INT: 敗戦), strikeouts (INT: 奪三振), title_awards (VARCHAR)"
+          columns: "id (INT), player_id (INT, FK), year (INT: 2024, 2025, 2026), war (DECIMAL), waa (DECIMAL), era (DECIMAL: 防御率), whip (DECIMAL), fip (DECIMAL), wins (INT: 勝利), losses (INT: 敗戦), saves (INT: セーブ), holds (INT: ホールド), strikeouts (INT: 奪三振), title_awards (VARCHAR)"
           relationships:
             - "JOIN players ON pitching_stats.player_id = players.player_id"
 
@@ -38,12 +38,12 @@ catalogs:
           columns: "team_id (VARCHAR: 'T','DB','G','D','C','S','H','F','M','E','B','L'), team_name (VARCHAR: 正式球団名), league (VARCHAR: 'Central' or 'Pacific')"
 
         - name: "team_standings"
-          description: "球団順位表 (2024年・2025年)"
+          description: "球団順位表 (2024年・2025年・2026年最新)"
           primary_key: "id"
-          columns: "id (INT), team_id (VARCHAR), team_name (VARCHAR), league (VARCHAR), year (INT), wins (INT), losses (INT), draws (INT), win_rate (DECIMAL), games_behind (DECIMAL)"
+          columns: "id (INT), team_id (VARCHAR), team_name (VARCHAR), league (VARCHAR), year (INT: 2024, 2025, 2026), wins (INT), losses (INT), draws (INT), win_rate (DECIMAL), games_behind (DECIMAL)"
 
       query_rules:
-        - "必ず year 条件（2024 または 2025）を指定してください。"
+        - "年度比較や分析を行う際は、year 条件（2024, 2025, 2026）を明示してください。"
         - "選手名を表示する際は、必ず players テーブルを player_id で JOIN してください。"
         - "探索用コマンド (SHOW TABLES, DESCRIBE) は不要です。直接本定義のカラムで SELECT を発行してください。"
 
