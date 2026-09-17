@@ -18,6 +18,10 @@ npm-debug.log*
 
 # Build outputs
 dist/
+
+# External services / submodules
+services/
+
 build/
 
 # OS specific

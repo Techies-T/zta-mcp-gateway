@@ -67,3 +67,22 @@ upstreams:
           - "TRUNCATE"
           - "GRANT"
           - "REVOKE"
+
+  - id: "admin-procedures"
+    path: "/mcp/admin-procedures"
+    target: "http://127.0.0.1:33070/mcp"
+    description: "Digital Agency Administrative Procedures MCP Server with ZTA Protection"
+    policies:
+      role_mappings:
+        guest:
+          allowed_tools: []
+        analyst:
+          allowed_tools:
+            - "list_datasets"
+            - "inspect_dataset"
+            - "query_records"
+            - "summarize_records"
+        admin:
+          allowed_tools:
+            - "*"
+
