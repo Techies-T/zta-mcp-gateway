@@ -14,15 +14,22 @@ describe("CatalogProvider & Meta-Catalog MCP", () => {
     assert.strictEqual(tools[1].name, "get_catalog_detail");
   });
 
-  test("listCatalog allows analyst role to see npb_baseball_analytics", () => {
+  test("listCatalog allows analyst role to see allowed catalogs", () => {
     const items = provider.listCatalog(["analyst"]);
-    assert.strictEqual(items.length, 1);
-    assert.strictEqual(items[0].id, "npb_baseball_analytics");
-    assert.strictEqual(items[0].target_mcp, "mariadb");
-    assert.strictEqual(items[0].target_tool, "read_query");
-    // Schema and GenUI must be omitted in list view
-    assert.strictEqual((items[0] as any).schema, undefined);
-    assert.strictEqual((items[0] as any).gen_ui, undefined);
+    assert.strictEqual(items.length, 2);
+    
+    const npb = items.find((i) => i.id === "npb_baseball_analytics");
+    assert.ok(npb);
+    assert.strictEqual(npb.target_mcp, "mariadb");
+    assert.strictEqual(npb.target_tool, "read_query");
+    assert.strictEqual((npb as any).schema, undefined);
+    assert.strictEqual((npb as any).gen_ui, undefined);
+
+    const digitalAgency = items.find((i) => i.id === "digital_agency_procedures");
+    assert.ok(digitalAgency);
+    assert.strictEqual(digitalAgency.target_mcp, "admin-procedures");
+    assert.strictEqual(digitalAgency.target_tool, "summarize_records");
+    assert.strictEqual((digitalAgency as any).schema, undefined);
   });
 
   test("listCatalog allows admin role to see all catalogs", () => {
@@ -63,6 +70,17 @@ describe("CatalogProvider & Meta-Catalog MCP", () => {
 
     const detailCard = detail.gen_ui.components.find((c) => c.type === "detail_card");
     assert.ok(detailCard);
+  });
+
+  test("getCatalogDetail returns full schema and GenUI for digital_agency_procedures", () => {
+    const detail = provider.getCatalogDetail("digital_agency_procedures", ["analyst"]);
+    assert.strictEqual(detail.id, "digital_agency_procedures");
+    assert.ok(detail.schema);
+    assert.ok(Array.isArray(detail.schema.datasets));
+    assert.strictEqual(detail.schema.datasets[0].id, "procedures-survey-r7");
+    assert.ok(detail.gen_ui);
+    assert.strictEqual(detail.gen_ui.recommended_layout, "AdministrativeReformDashboard");
+    assert.strictEqual(detail.gen_ui.framework, "TailwindCSS + Chart.js");
   });
 
   test("getCatalogDetail denies access for unauthorized role", () => {

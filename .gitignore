@@ -19,8 +19,12 @@ npm-debug.log*
 # Build outputs
 dist/
 
-# External services / submodules
-services/
+# External services / local venvs & raw datasets
+services/**/.venv/
+services/**/venv/
+services/**/source-data/
+services/**/__pycache__/
+services/**/.pytest_cache/
 
 build/
 

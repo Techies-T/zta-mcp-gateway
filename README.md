@@ -317,8 +317,52 @@ curl -s -X POST http://localhost:8085/mcp/mariadb \
 
 ---
 
+## 🏛️ デジタル庁 行政手続分析 MCP サービス（実証サンプル同梱）
+
+本リポジトリには、デジタル庁がオープンデータとして公開している**「行政手続等の棚卸調査結果（令和6年度 75,071件、令和7年度 76,275件）」**を高速分析する MCP サーバー（`services/administrative-procedures-mcp`）が実証サンプルデータとともに同梱されています。
+
+### 1. 特徴とアーキテクチャ
+- **同梱サンプルデータ**:
+  - 全7.6万件の行政手続全数データを最適化済み Parquet 形式（合計 約6.5MB）でリポジトリにネイティブ収録。
+  - クローン直後から外部通信なしでローカルまたはコンテナ内で即座に集計・検索可能。
+- **ZTA セキュリティ**:
+  - `analyst` ロールに対して `list_datasets`, `inspect_dataset`, `query_records`, `summarize_records` の4つの分析ツールのみを公開。
+  - 危険なシステムコマンドや未認可ツールは Context Masking により AI の視界から遮断。
+- **Meta-Catalog MCP 連携**:
+  - AI エージェントに対して「行政改革ダッシュボード（`AdministrativeReformDashboard`）」の推奨レイアウト、Chart.js 設計図を提供。
+
+### 2. ワンコマンド起動方法
+
+#### 方式 A: Docker Compose による一括起動（推奨）
+```bash
+# ゲートウェイとデジ庁MCPサーバーを一括起動
+docker compose up -d
+
+# 稼働ステータス確認
+docker compose ps
+```
+
+#### 方式 B: ローカル Python での直接起動
+```bash
+# ポート 33070 で HTTP ブリッジを起動（初回は自動で仮想環境構築と依存インストールを実施）
+bash scripts/start-admin-procedures.sh
+```
+
+### 3. MacOSUI からの接続
+1. MacOSUI の **MCP サーバー管理** 画面を開く。
+2. 以下の設定で追加（または `autoActivate` により自動登録）：
+   - **名称**: `デジタル庁 行政手続分析 MCP (ZTA保護)`
+   - **エンドポイント URL**: `http://host.docker.internal:8085/mcp/admin-procedures/sse`
+   - **トークン URL**: `http://host.docker.internal:8085/oauth/token`
+   - **Client ID**: `macosui-analyst`
+   - **Client Secret**: `analyst-secret-2026`
+3. チャットまたはプロンプトテンプレートから「行政手続・ライフイベント別デジタル化ダッシュボード」を選択して実行すると、国民のライフイベント別手続数や添付書類撤廃状況を可視化する GenUI ダッシュボードが自動生成されます。
+
+---
+
 ## 📄 詳細仕様書
 より詳細なシステム要件、インターフェース定義、セキュリティ監査ログの仕様については、[docs/SPECIFICATION.md](docs/SPECIFICATION.md) をご覧ください。
+デジタル庁 MCP の詳細なデータ仕様とクエリ例は [docs/DIGITAL_AGENCY_MCP_GUIDE.md](docs/DIGITAL_AGENCY_MCP_GUIDE.md) をご覧ください。
 
 ---
 

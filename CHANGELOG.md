@@ -5,6 +5,35 @@
 
 ---
 
+## [v1.1.0] - 2026-09-17
+
+### 🚀 デジタル庁 行政手続分析 MCP & サンプルデータ統合リリース
+
+#### ✨ Added (新機能・機能追加)
+- **🏛️ デジタル庁 行政手続分析 MCP サービス (`services/administrative-procedures-mcp`)**:
+  - デジタル庁公式の行政手続棚卸調査データ（令和6年度 75,071件、令和7年度 76,275件）を高速検索・集計する分析エンジンを同梱。
+  - `list_datasets`: 調査データセット（`procedures-survey-r7` / `r6`）の一覧取得。
+  - `inspect_dataset`: データセットのスキーマ構造、型情報、数値統計の検査。
+  - `query_records`: 手続名、根拠法令、所管府省庁、手続類型等の詳細レコード検索・フィルタリング。
+  - `summarize_records`: 自治体事務区分別オンライン化率、個人・法人のライフイベント別手続数、添付書類（戸籍・住民票等）撤廃状況のクロス集計。
+- **📦 サンプルデータのネイティブ同梱 (`datasets/*/data.parquet`)**:
+  - 全数調査データを最適化された Parquet 形式（2ファイル合計 約6.5MB）としてリポジトリに同梱。
+  - 外部からのダウンロードや重い変換処理なしに、クローン直後からローカルまたは Docker で即座に DuckDB/Polars 高速クエリが可能。
+- **🛡️ ゼロトラスト認可制御 (ZTA PEP / Context Masking)**:
+  - `admin-procedures` へのアクセスを ZTA Gateway で保護。
+  - `analyst` ロールに対しては 4 つの分析ツールのみを開示し、システム系コマンドや未許可ツールは AI の視界から完全にマスキング（`guest` は完全非開示）。
+- **📊 Meta-Catalog MCP への分析モデル & GenUI 設計図登録**:
+  - `config/catalog-definitions.yaml` に `digital_agency_procedures` を追加。
+  - AI エージェントが国民目線・行政改革視点で高品質なダッシュボードを生成できるよう、推奨レイアウト（`AdministrativeReformDashboard`）および Chart.js グラフ仕様、インサイトバナー仕様を提供。
+- **🐳 Docker Compose & ワンコマンド起動環境**:
+  - `services/administrative-procedures-mcp/Dockerfile` および `requirements.txt` を作成。
+  - `docker-compose.yml` に `admin-procedures-mcp` サービスを追加し、`docker compose up -d` でゲートウェイと分析サーバーを一括起動。
+  - ローカル Python 環境用の一発起動スクリプト `scripts/start-admin-procedures.sh` を整備。
+- **🧪 統合テストスイートの拡充**:
+  - `tests/pep/admin-procedures.test.ts` を追加し、デジ庁ツールの PEP 認可とマスキング挙動を自動検証。
+
+---
+
 ## [v0.2.0] - 2026-09-10
 
 ### 🚀 Meta-Catalog MCP & SSE Keepalive Engine
