@@ -5,6 +5,19 @@
 
 ---
 
+## [v1.1.1] - 2026-09-18
+
+### 🚀 AI Analytics Knowledge Base & Pod Integration Release
+
+#### ✨ Added (新機能・機能追加)
+- **📚 MacOSUI v2.6.0 AI Analytics ナレッジベース連携対応**:
+  - `admin-procedures` および `mariadb` による MCP 分析結果（GenUI ダッシュボード）を、MacOSUI 側の専用 Pod（「デジ庁データ分析」「NPB野球データ分析」）にゼロトークンで永続保存・共有する連携仕様を策定・確認。
+- **🔧 パッケージバージョンおよびドキュメント整合性向上**:
+  - `package.json` を `v1.1.1` に更新。
+  - 最新の MacOSUI 接続ガイドとの連携記述を調整。
+
+---
+
 ## [v1.1.0] - 2026-09-17
 
 ### 🚀 デジタル庁 行政手続分析 MCP & サンプルデータ統合リリース
